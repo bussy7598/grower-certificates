@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import difflib
 from datetime import datetime, timedelta
-import os
+import io
 
 # ===== SETTINGS =====
-CERT_FILE = r"C:\Users\SeanBuss\Project_Cert\Grower Certifications.xlsx"
-CONTACT_FILE = r"C:\Users\SeanBuss\Project_Cert\Contact Log.xlsx"   # will be created if missing
 EXPIRY_WARNING_DAYS = 60  # threshold for "Expiring Soon"
 
 # ===== Helpers for robust column mapping =====
@@ -17,16 +15,18 @@ EXPECTED = {
     "Expiry Date": "Expiry Date"
 }
 
-def load_and_map_certificates(path):
-    # try reading common excel forms; if header row is not row0, we attempt header=2 as fallback
+def load_and_map_certificates(file):
+    """
+    Load and clean certificates from an Excel file.
+    'file' can be a file-like object (Streamlit upload) or path
+    """
     try:
-        df = pd.read_excel(path)
+        df = pd.read_excel(file)
     except Exception:
-        df = pd.read_excel(path, header=2)
+        df = pd.read_excel(file, header=2)
 
     # tidy column names
     df.columns = [str(c).strip() for c in df.columns]
-    # drop unnamed helper cols
     df = df.loc[:, ~df.columns.str.contains('^Unnamed', case=False)]
 
     # fuzzy match and rename
@@ -37,17 +37,17 @@ def load_and_map_certificates(path):
             col_map[match[0]] = EXPECTED[expected_col]
     df = df.rename(columns=col_map)
 
-    # ensure our canonical columns exist
     for canonical in EXPECTED.values():
         if canonical not in df.columns:
             df[canonical] = ""
 
-    # parse expiry date column robustly
+    # parse expiry date
     df['Expiry Date'] = pd.to_datetime(df['Expiry Date'], errors='coerce')
 
     # compute derived fields
     today = pd.Timestamp.today()
     df['Days_Until_Expiry'] = (df['Expiry Date'] - today).dt.days
+
     def status_from_days(days):
         if pd.isna(days):
             return "Unknown"
@@ -56,32 +56,35 @@ def load_and_map_certificates(path):
         if days <= EXPIRY_WARNING_DAYS:
             return "Expiring Soon"
         return "Valid"
-    df['Status'] = df['Days_Until_Expiry'].apply(status_from_days)
 
-    # keep useful columns and return
+    df['Status'] = df['Days_Until_Expiry'].apply(status_from_days)
     return df
 
-def load_contact_log(path):
+def load_contact_log(file=None):
+    """
+    Load contact log from an uploaded file or create empty DataFrame
+    """
     cols = ["Date", "Supplier", "Action", "Notes"]
-    if os.path.exists(path):
+    if file:
         try:
-            log = pd.read_excel(path)
+            df = pd.read_excel(file)
         except Exception:
-            log = pd.read_csv(path)
+            df = pd.read_csv(file)
         for col in cols:
-            if col not in log.columns:
-                log[col] = ""
+            if col not in df.columns:
+                df[col] = ""
     else:
-        log = pd.DataFrame(columns=["Date","Supplier","Action","Notes"])
-    return log
+        df = pd.DataFrame(columns=cols)
+    return df
 
-def save_contact_log(df, path):
-    # prefer Excel for readability; fallback to csv if write fails
-    try:
-        df.to_excel(path, index=False)
-    except Exception:
-        csv_path = os.path.splitext(path)[0] + ".csv"
-        df.to_csv(csv_path, index=False)
+def save_contact_log(df):
+    """
+    Returns a BytesIO object of Excel file for download
+    """
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+    return output
 
 def style_row(row):
     """Colour Rows By Status"""
@@ -91,20 +94,24 @@ def style_row(row):
     if status == "Expiring Soon":
         return ['background-color: #ff9966'] * len(row)
     if status == "Valid":
-        return ['background-color: #000000'] * len(row)
+        return ['background-color: #00cc00'] * len(row)
     return [''] * len(row)
 
 # ===== App UI =====
 st.set_page_config(page_title="Certification Tracker", layout="wide")
 st.title("Certification Tracker — Interactive")
 
-# Load data
-st.sidebar.markdown("### Configuration")
-st.sidebar.write(f"Cert file: `{CERT_FILE}`")
-st.sidebar.write(f"Contact file: `{CONTACT_FILE}`")
+st.sidebar.markdown("### Upload Files")
+cert_file = st.sidebar.file_uploader("Upload Grower Certifications Excel", type=["xlsx"])
+contact_file = st.sidebar.file_uploader("Upload Contact Log Excel (optional)", type=["xlsx","csv"])
 
-df = load_and_map_certificates(CERT_FILE)
-contact_log = load_contact_log(CONTACT_FILE)
+if cert_file:
+    df = load_and_map_certificates(cert_file)
+else:
+    st.warning("Please upload a certifications Excel file to continue.")
+    st.stop()
+
+contact_log = load_contact_log(contact_file)
 
 # Grower selector
 growers = sorted(df['Supplier'].dropna().unique().tolist())
@@ -119,8 +126,8 @@ with col2:
 with col3:
     refresh = st.button("Refresh data")
 
-if refresh:
-    df = load_and_map_certificates(CERT_FILE)
+if refresh and cert_file:
+    df = load_and_map_certificates(cert_file)
     st.experimental_rerun()
 
 # Filter dataframe
@@ -150,7 +157,6 @@ m5.metric("Unknown", unknown_count)
 st.subheader("Certificates")
 display_cols = ['Supplier', 'Certification Body','Certificate','Expiry Date','Days_Until_Expiry','Status']
 display_df = filtered[display_cols].copy()
-# format expiry for nicer view
 display_df['Expiry Date'] = display_df['Expiry Date'].dt.strftime('%Y-%m-%d')
 st.dataframe(display_df.style.apply(style_row, axis=1), use_container_width=True)
 
@@ -158,31 +164,24 @@ st.dataframe(display_df.style.apply(style_row, axis=1), use_container_width=True
 colA, colB = st.columns([1,1])
 with colA:
     if st.button("Export certificates (selected) to Excel"):
-        out_path = os.path.join(os.getcwd(), f"{selected}_certs.xlsx" if selected!="(All growers)" else "all_certs.xlsx")
-        filtered.to_excel(out_path, index=False)
-        st.success(f"Exported to `{out_path}`")
+        out_file = save_contact_log(filtered)
+        st.download_button("Download Certificates Excel", out_file, file_name=f"{selected}_certs.xlsx" if selected!="(All growers)" else "all_certs.xlsx")
 with colB:
     if st.button("Export contact log (selected) to Excel"):
         if selected == "(All growers)":
-            out_path = os.path.join(os.getcwd(), "all_contact_log.xlsx")
-            contact_log.to_excel(out_path, index=False)
+            out_file = save_contact_log(contact_log)
         else:
-            out_path = os.path.join(os.getcwd(), f"{selected}_contact_log.xlsx")
-            contact_log[contact_log['Supplier'] == selected].to_excel(out_path, index=False)
-        st.success(f"Exported to `{out_path}`")
+            out_file = save_contact_log(contact_log[contact_log['Supplier'] == selected])
+        st.download_button("Download Contact Log Excel", out_file, file_name=f"{selected}_contact_log.xlsx" if selected!="(All growers)" else "all_contact_log.xlsx")
 
 # Contact log section
 st.subheader("Contact log")
 if selected == "(All growers)":
     st.write("Showing all contact entries")
-    if "Date" in contact_log.columns:
-        st.dataframe(contact_log.sort_values("Date", ascending=False), use_container_width=True)
-    else:
-        st.dataframe(contact_log, use_container_width=True)
+    st.dataframe(contact_log.sort_values("Date", ascending=False), use_container_width=True)
 else:
     entries = contact_log[contact_log['Supplier'] == selected]
-    if "Date" in entries.columns:
-        entries = entries.sort_values("Date", ascending=False)
+    entries = entries.sort_values("Date", ascending=False) if "Date" in entries.columns else entries
     st.dataframe(entries, use_container_width=True)
 
 # Add new contact entry (form)
@@ -203,9 +202,10 @@ with st.form("contact_form", clear_on_submit=True):
                 "Notes": c_notes
             }
             contact_log = pd.concat([contact_log, pd.DataFrame([new_row])], ignore_index=True)
-            save_contact_log(contact_log, CONTACT_FILE)
-            st.success("Contact saved")
+            st.success("Contact saved (in memory, download updated log below)")
+            # offer updated download
+            st.download_button("Download Updated Contact Log", save_contact_log(contact_log), file_name="updated_contact_log.xlsx")
 
 # Small footer
 st.markdown("---")
-st.caption("Local app — Contact log is saved to the CONTACT_FILE on disk. For multi-user concurrency use a shared DB or spreadsheet host (SharePoint/OneDrive).")
+st.caption("Streamlit Cloud app — Upload files via sidebar. Downloads are provided for certificates and contact log. Multi-user concurrency requires shared storage or database.")
