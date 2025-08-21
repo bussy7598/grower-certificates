@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import difflib
-from datetime import datetime, timedelta
+from datetime import datetime
 import io
 
 # ===== SETTINGS =====
@@ -16,16 +16,12 @@ EXPECTED = {
 }
 
 def load_and_map_certificates(file):
-    """
-    Load and clean certificates from an Excel file.
-    'file' can be a file-like object (Streamlit upload) or path
-    """
+    """Load and clean certificates from an Excel file."""
     try:
         df = pd.read_excel(file)
     except Exception:
         df = pd.read_excel(file, header=2)
 
-    # tidy column names
     df.columns = [str(c).strip() for c in df.columns]
     df = df.loc[:, ~df.columns.str.contains('^Unnamed', case=False)]
 
@@ -41,10 +37,7 @@ def load_and_map_certificates(file):
         if canonical not in df.columns:
             df[canonical] = ""
 
-    # parse expiry date
     df['Expiry Date'] = pd.to_datetime(df['Expiry Date'], errors='coerce')
-
-    # compute derived fields
     today = pd.Timestamp.today()
     df['Days_Until_Expiry'] = (df['Expiry Date'] - today).dt.days
 
@@ -61,9 +54,7 @@ def load_and_map_certificates(file):
     return df
 
 def load_contact_log(file=None):
-    """
-    Load contact log from an uploaded file or create empty DataFrame
-    """
+    """Load contact log from uploaded file or create empty DataFrame"""
     cols = ["Date", "Supplier", "Action", "Notes"]
     if file:
         try:
@@ -78,16 +69,13 @@ def load_contact_log(file=None):
     return df
 
 def save_contact_log(df):
-    """
-    Returns a BytesIO object of Excel file for download
-    """
+    """Return BytesIO object for Excel download"""
     output = io.BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
     return output
 
 def style_row(row):
-    """Colour Rows By Status"""
     status = row['Status']
     if status == "Expired":
         return ['background-color: #ff0000'] * len(row)
@@ -97,7 +85,7 @@ def style_row(row):
         return ['background-color: #00cc00'] * len(row)
     return [''] * len(row)
 
-# ===== App UI =====
+# ===== Streamlit UI =====
 st.set_page_config(page_title="Certification Tracker", layout="wide")
 st.title("Certification Tracker — Interactive")
 
@@ -105,19 +93,18 @@ st.sidebar.markdown("### Upload Files")
 cert_file = st.sidebar.file_uploader("Upload Grower Certifications Excel", type=["xlsx"])
 contact_file = st.sidebar.file_uploader("Upload Contact Log Excel (optional)", type=["xlsx","csv"])
 
-if cert_file:
-    df = load_and_map_certificates(cert_file)
-else:
+if not cert_file:
     st.warning("Please upload a certifications Excel file to continue.")
     st.stop()
 
+df = load_and_map_certificates(cert_file)
 contact_log = load_contact_log(contact_file)
 
 # Grower selector
 growers = sorted(df['Supplier'].dropna().unique().tolist())
 selected = st.selectbox("Select grower / supplier", ["(All growers)"] + growers)
 
-# Filters row
+# Filters
 col1, col2, col3 = st.columns([2,1,1])
 with col1:
     search = st.text_input("Quick search supplier (contains):")
@@ -154,35 +141,36 @@ m3.metric("Expiring Soon", expiring_count)
 m4.metric("Expired", expired_count)
 m5.metric("Unknown", unknown_count)
 
+# Certificates table
 st.subheader("Certificates")
 display_cols = ['Supplier', 'Certification Body','Certificate','Expiry Date','Days_Until_Expiry','Status']
 display_df = filtered[display_cols].copy()
 display_df['Expiry Date'] = display_df['Expiry Date'].dt.strftime('%Y-%m-%d')
 st.dataframe(display_df.style.apply(style_row, axis=1), use_container_width=True)
 
-# Export buttons
-colA, colB = st.columns([1,1])
+# Export buttons outside forms
+st.subheader("Export Data")
+colA, colB = st.columns(2)
 with colA:
-    if st.button("Export certificates (selected) to Excel"):
-        out_file = save_contact_log(filtered)
-        st.download_button("Download Certificates Excel", out_file, file_name=f"{selected}_certs.xlsx" if selected!="(All growers)" else "all_certs.xlsx")
+    out_file = save_contact_log(filtered)
+    st.download_button(
+        "Download Certificates Excel",
+        out_file,
+        file_name=f"{selected}_certs.xlsx" if selected != "(All growers)" else "all_certs.xlsx"
+    )
 with colB:
-    if st.button("Export contact log (selected) to Excel"):
-        if selected == "(All growers)":
-            out_file = save_contact_log(contact_log)
-        else:
-            out_file = save_contact_log(contact_log[contact_log['Supplier'] == selected])
-        st.download_button("Download Contact Log Excel", out_file, file_name=f"{selected}_contact_log.xlsx" if selected!="(All growers)" else "all_contact_log.xlsx")
+    out_file_log = save_contact_log(contact_log if selected == "(All growers)" else contact_log[contact_log['Supplier'] == selected])
+    st.download_button(
+        "Download Contact Log Excel",
+        out_file_log,
+        file_name=f"{selected}_contact_log.xlsx" if selected != "(All growers)" else "all_contact_log.xlsx"
+    )
 
-# Contact log section
+# Contact log table
 st.subheader("Contact log")
-if selected == "(All growers)":
-    st.write("Showing all contact entries")
-    st.dataframe(contact_log.sort_values("Date", ascending=False), use_container_width=True)
-else:
-    entries = contact_log[contact_log['Supplier'] == selected]
-    entries = entries.sort_values("Date", ascending=False) if "Date" in entries.columns else entries
-    st.dataframe(entries, use_container_width=True)
+entries = contact_log if selected == "(All growers)" else contact_log[contact_log['Supplier'] == selected]
+entries = entries.sort_values("Date", ascending=False) if "Date" in entries.columns else entries
+st.dataframe(entries, use_container_width=True)
 
 # Add new contact entry (form)
 st.markdown("### Log new contact")
@@ -202,10 +190,8 @@ with st.form("contact_form", clear_on_submit=True):
                 "Notes": c_notes
             }
             contact_log = pd.concat([contact_log, pd.DataFrame([new_row])], ignore_index=True)
-            st.success("Contact saved (in memory, download updated log below)")
-            # offer updated download
-            st.download_button("Download Updated Contact Log", save_contact_log(contact_log), file_name="updated_contact_log.xlsx")
+            st.success("Contact saved (in memory). Download updated log using the button above.")
 
-# Small footer
+# Footer
 st.markdown("---")
-st.caption("Streamlit Cloud app — Upload files via sidebar. Downloads are provided for certificates and contact log. Multi-user concurrency requires shared storage or database.")
+st.caption("Streamlit Cloud app — Upload files via sidebar. Downloads provided for certificates and contact log. Multi-user concurrency requires shared storage or database.")
